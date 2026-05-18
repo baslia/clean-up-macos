@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly HOME_DIR="${HOME:?HOME is not set}"
+readonly APPLE_PLATFORM="$(uname -s)"
+
+if [[ "$APPLE_PLATFORM" != "Darwin" ]]; then
+  printf 'Error: %s is intended for macOS only.\n' "$SCRIPT_NAME" >&2
+  exit 1
+fi
+
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+  printf 'Error: do not run %s as root.\n' "$SCRIPT_NAME" >&2
+  exit 1
+fi
+
+dry_run=true
+assume_yes=false
+run_cache=false
+run_logs=false
+
+usage() {
+  cat <<'EOF'
+Usage: clean-macos [--apply] [--yes] [--cache] [--logs]
+
+Safely removes user-space macOS cleanup targets.
+
+Options:
+  --apply   Perform deletions instead of only showing a dry run
+  --yes     Skip the interactive confirmation prompt
+  --cache   Clean user cache contents in ~/Library/Caches
+  --logs    Clean user log contents in ~/Library/Logs
+  -h, --help Show this help text
+
+If no category flags are provided, both --cache and --logs are used.
+EOF
+}
+
+warn() {
+  printf '⚠ %s\n' "$*" >&2
+}
+
+info() {
+  printf '• %s\n' "$*"
+}
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+canonical_dir() {
+  local path="$1"
+  [[ -d "$path" ]] || return 1
+  (cd "$path" && pwd -P)
+}
+
+declare -a target_dirs=()
+declare -a targets=()
+
+collect_children() {
+  local dir="$1"
+  local resolved
+  resolved="$(canonical_dir "$dir")" || return 0
+
+  if [[ ! -d "$resolved" ]]; then
+    return 0
+  fi
+
+  while IFS= read -r -d '' entry; do
+    targets+=("$entry")
+  done < <(find "$resolved" -mindepth 1 -maxdepth 1 -print0)
+}
+
+confirm() {
+  local prompt="$1"
+  local response
+  read -r -p "$prompt" response
+  [[ "$response" == "DELETE" ]]
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply)
+      dry_run=false
+      shift
+      ;;
+    --yes)
+      assume_yes=true
+      shift
+      ;;
+    --cache)
+      run_cache=true
+      shift
+      ;;
+    --logs)
+      run_logs=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+if ! $run_cache && ! $run_logs; then
+  run_cache=true
+  run_logs=true
+fi
+
+if $run_cache; then
+  target_dirs+=("$HOME_DIR/Library/Caches")
+fi
+
+if $run_logs; then
+  target_dirs+=("$HOME_DIR/Library/Logs")
+fi
+
+for dir in "${target_dirs[@]}"; do
+  collect_children "$dir"
+done
+
+info "Resolved cleanup targets:"
+if ((${#targets[@]} == 0)); then
+  info "Nothing to do."
+  exit 0
+fi
+
+for target in "${targets[@]}"; do
+  printf '%s\n' "$target"
+done
+
+if $dry_run; then
+  info "Dry run only. Re-run with --apply to delete these targets."
+  exit 0
+fi
+
+if ! $assume_yes; then
+  warn "This will permanently delete the listed items."
+  warn "Type DELETE to continue."
+  if ! confirm "> "; then
+    info "Aborted."
+    exit 0
+  fi
+fi
+
+for target in "${targets[@]}"; do
+  rm -rf -- "$target"
+done
+
+info "Cleanup complete."
